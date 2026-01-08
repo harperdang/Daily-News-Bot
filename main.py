@@ -62,7 +62,7 @@ def send_email(content):
         # Gmail: smtp.gmail.com, 587
         # Outlook: smtp.office365.com, 587
         # QQ: smtp.qq.com, 465 (需要用 SSL)
-        server = smtplib.SMTP('smtp.gmail.com', 587) 
+        server = smtplib.SMTP_SSL('smtp.qq.com', 465) 
         server.starttls()
         server.login(sender, password)
         server.sendmail(sender, [receiver], message.as_string())
