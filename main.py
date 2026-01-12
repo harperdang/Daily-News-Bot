@@ -9,12 +9,16 @@ import os
 import ssl
 import json
 import requests
+import re
 
 # --- 配置 ---
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
 # 关键词追踪列表
 TRACKED_KEYWORDS = ['China', 'Taiwan', 'semiconductor', 'chip', 'TSMC', 'Nvidia']
+
+# 排除的媒体（不纳入关键词追踪）
+EXCLUDED_KEYWORD_SOURCES = ['South China Morning Post']
 
 # GitHub Gist 用于存储预测数据（需要配置 GIST_TOKEN 和 GIST_ID）
 GIST_TOKEN = os.environ.get('GIST_TOKEN')
@@ -86,9 +90,13 @@ def fetch_all_news():
     return structured_news
 
 def filter_keyword_news(news_data):
-    """筛选包含关键词的新闻"""
+    """筛选包含关键词的新闻（排除特定媒体）"""
     keyword_news = []
     for news in news_data:
+        # 排除特定媒体
+        if news['source'] in EXCLUDED_KEYWORD_SOURCES:
+            continue
+            
         title_lower = news['title'].lower()
         for keyword in TRACKED_KEYWORDS:
             if keyword.lower() in title_lower:
@@ -285,7 +293,7 @@ def generate_full_report(news_data, keyword_news, previous_predictions):
     === 全部新闻数据 ===
     {data_payload}
     
-    === 关键词追踪新闻（China/Taiwan/Semiconductor相关）===
+    === 关键词追踪新闻（China/Taiwan/Semiconductor相关，已排除南华早报）===
     {keyword_payload}
     
     {prediction_review}
@@ -305,10 +313,14 @@ def generate_full_report(news_data, keyword_news, previous_predictions):
 
     ---
     ## 第三部分：🔥 China/Taiwan/Semiconductor 专题追踪
-    专门分析关于中国、台湾、半导体相关的新闻动态：
-    - 列出所有相关新闻的标题和链接
-    - 分析这些新闻反映的地缘政治趋势
-    - 评估对半导体产业链的潜在影响
+    **结构要求**：
+    1. 首先用 200-300 字进行深度分析和总结，包括：
+       - 这些新闻反映的地缘政治趋势
+       - 对半导体产业链的潜在影响
+       - **你的独立判断和观点**（例如：你认为局势会如何发展，哪些信号值得关注）
+    2. 然后再列出相关新闻的标题和链接
+    
+    **注意**：不要包含南华早报(South China Morning Post)的新闻。
 
     ---
     ## 第四部分：📈 市场影响预测 (Market Impact Forecast)
@@ -319,15 +331,17 @@ def generate_full_report(news_data, keyword_news, previous_predictions):
     - 对大宗商品（石油、黄金）的影响
     - 给出具体的预测方向（上涨/下跌/震荡）和置信度（高/中/低）
     
-    **重要**：请在预测部分末尾，用以下JSON格式总结你的预测（用 <!-- PREDICTIONS_JSON_START --> 和 <!-- PREDICTIONS_JSON_END --> 包裹）：
-    <!-- PREDICTIONS_JSON_START -->
+    **重要**：预测数据需要用 HTML 注释隐藏，格式如下（这部分不会显示在邮件中）：
+    <!-- PREDICTIONS_JSON_START
     {{
         "date": "YYYY-MM-DD",
         "predictions": [
             {{"asset": "资产名称", "direction": "上涨/下跌/震荡", "confidence": "高/中/低", "reason": "简要原因"}}
         ]
     }}
-    <!-- PREDICTIONS_JSON_END -->
+    PREDICTIONS_JSON_END -->
+    
+    **不要在正文中显示任何 JSON 格式的数据！**
 
     ---
     ## 第五部分：预测复盘 (Prediction Review)
@@ -335,16 +349,27 @@ def generate_full_report(news_data, keyword_news, previous_predictions):
 
     ---
     ## 第六部分：📰 其他新闻速览 (Other Headlines)
-    将未在核心议题中提及的其他新闻，按地区分类列出标题和链接（每个地区最多10条）。
-    格式：
-    <h4>🇺🇸 美国媒体</h4>
-    <ul style="font-size:12px;"><li><a href="链接">[媒体名] 标题</a></li></ul>
+    将未在核心议题中提及的其他新闻，按地区分类列出。
     
-    <h4>🇪🇺 欧洲媒体</h4>
-    ...
+    **排版要求**（使用卡片式布局，更美观）：
+    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:20px; margin-top:20px;">
+        <div style="background:#f8f9fa; border-radius:8px; padding:15px; border-left:4px solid #3498db;">
+            <h4 style="margin:0 0 10px; color:#2c3e50;">🇺🇸 美国媒体</h4>
+            <ul style="font-size:12px; margin:0; padding-left:18px; line-height:1.8;">
+                <li><a href="链接" style="color:#3498db; text-decoration:none;">[媒体名] 标题</a></li>
+            </ul>
+        </div>
+        <div style="background:#f8f9fa; border-radius:8px; padding:15px; border-left:4px solid #e74c3c;">
+            <h4 style="margin:0 0 10px; color:#2c3e50;">🇪🇺 欧洲媒体</h4>
+            ...
+        </div>
+        <div style="background:#f8f9fa; border-radius:8px; padding:15px; border-left:4px solid #f39c12;">
+            <h4 style="margin:0 0 10px; color:#2c3e50;">🌏 亚洲媒体</h4>
+            ...
+        </div>
+    </div>
     
-    <h4>🌏 亚洲媒体</h4>
-    ...
+    每个地区最多列出 10 条新闻。
 
     ---
     **样式要求**：
@@ -353,24 +378,36 @@ def generate_full_report(news_data, keyword_news, previous_predictions):
     - 链接蓝色 (#3498db)，hover时有下划线
     - 各部分之间用 <hr style="border:1px solid #eee; margin:30px 0;"> 分隔
     - 预测部分用醒目的背景色 (#fff3cd) 突出显示
+    - 确保所有内容都是干净的 HTML，不要有裸露的 JSON 文本
     """
 
     return call_gemini_api(prompt)
 
 def extract_predictions(html_content):
-    """从 HTML 内容中提取预测 JSON"""
+    """从 HTML 内容中提取预测 JSON（从注释中提取）"""
     try:
-        start_marker = "<!-- PREDICTIONS_JSON_START -->"
-        end_marker = "<!-- PREDICTIONS_JSON_END -->"
+        # 匹配 HTML 注释中的 JSON
+        pattern = r'<!-- PREDICTIONS_JSON_START\s*(.*?)\s*PREDICTIONS_JSON_END -->'
+        match = re.search(pattern, html_content, re.DOTALL)
         
-        if start_marker in html_content and end_marker in html_content:
-            start_idx = html_content.index(start_marker) + len(start_marker)
-            end_idx = html_content.index(end_marker)
-            json_str = html_content[start_idx:end_idx].strip()
+        if match:
+            json_str = match.group(1).strip()
             return json.loads(json_str)
     except Exception as e:
         print(f"⚠️ 提取预测数据失败: {e}")
     return None
+
+def clean_html_output(html_content):
+    """清理 HTML 输出，移除不需要显示的内容"""
+    # 移除 Markdown 代码块标记
+    html_content = html_content.replace("```html", "").replace("```", "")
+    
+    # 移除可能暴露的 JSON 数据（作为备用清理）
+    # 匹配类似 { "date": "...", "predictions": [...] } 的模式
+    json_pattern = r'\{\s*"date"\s*:\s*"[^"]+"\s*,\s*"predictions"\s*:\s*\[.*?\]\s*\}'
+    html_content = re.sub(json_pattern, '', html_content, flags=re.DOTALL)
+    
+    return html_content.strip()
 
 def send_email(content):
     sender = os.environ.get('MAIL_USERNAME')
@@ -390,13 +427,13 @@ def send_email(content):
     msg = MIMEMultipart()
     msg['From'] = Header("News Analyst", 'utf-8')
     msg['To'] = Header("Subscriber", 'utf-8')
-    msg['Subject'] = Header(f"【深度舆情】{datetime.date.today()} 全球媒体关注点分析 + 市场预测", 'utf-8')
+    msg['Subject'] = Header(f"【全球新闻简报】{datetime.date.today()}", 'utf-8')
 
     full_html = f"""
     <div style="font-family: Arial, sans-serif; max-width: 900px; margin: auto; padding: 20px; background-color: #f9f9f9;">
         <div style="background-color: #2c3e50; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
-            <h1 style="margin:0; font-size: 24px;">🌍 Global Media Monitor Pro</h1>
-            <p style="margin:5px 0 0; font-size: 14px; opacity: 0.8;">{datetime.date.today()} | US · Europe · Asia Analysis | Market Forecast</p>
+            <h1 style="margin:0; font-size: 24px;">🌍 全球新闻简报</h1>
+            <p style="margin:5px 0 0; font-size: 14px; opacity: 0.8;">{datetime.date.today()} | Global News Digest</p>
         </div>
         <div style="background-color: white; padding: 20px; border: 1px solid #ddd;">
             {content}
@@ -427,7 +464,7 @@ if __name__ == "__main__":
         print("未抓取到新闻。")
         exit()
     
-    # 2. 筛选关键词新闻
+    # 2. 筛选关键词新闻（已排除南华早报）
     keyword_news = filter_keyword_news(news_data)
     print(f"🔍 找到 {len(keyword_news)} 条关键词相关新闻")
     
@@ -440,15 +477,15 @@ if __name__ == "__main__":
     analysis_html = generate_full_report(news_data, keyword_news, previous_predictions)
     
     if analysis_html:
-        # 清洗 Markdown 标记
-        clean_html = analysis_html.replace("```html", "").replace("```", "").strip()
-        
-        # 5. 提取并保存今天的预测
-        today_predictions = extract_predictions(clean_html)
+        # 5. 提取并保存今天的预测（在清理之前）
+        today_predictions = extract_predictions(analysis_html)
         if today_predictions:
             save_predictions(today_predictions)
         
-        # 6. 发送邮件
+        # 6. 清理 HTML 输出
+        clean_html = clean_html_output(analysis_html)
+        
+        # 7. 发送邮件
         send_email(clean_html)
     else:
         print("⚠️ 分析失败，跳过发送。")
