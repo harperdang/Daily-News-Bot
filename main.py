@@ -181,10 +181,11 @@ def get_available_models(api_key):
         
         print(f"✅ 发现可用模型: {candidates}")
 
+        # 优先使用 Pro 模型（输出更长更完整）
         priority_keywords = [
-            'gemini-1.5-flash',
             'gemini-1.5-pro',
             'gemini-2.0-flash',
+            'gemini-1.5-flash',
             'gemini-pro',
         ]
         
@@ -205,7 +206,7 @@ def get_available_models(api_key):
         return ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']
 
 def call_gemini_api(prompt, max_retries=3):
-    """通用的 Gemini API 调用函数"""
+    """通用的 Gemini API 调用函数，增加输出长度配置"""
     if not GEMINI_API_KEY:
         print("❌ 错误: 没找到 GEMINI_API_KEY")
         return None
@@ -216,7 +217,11 @@ def call_gemini_api(prompt, max_retries=3):
     body = {
         "contents": [{
             "parts": [{"text": prompt}]
-        }]
+        }],
+        "generationConfig": {
+            "maxOutputTokens": 8192,  # 增加输出长度限制
+            "temperature": 0.7
+        }
     }
 
     for model_name in available_models:
@@ -230,6 +235,11 @@ def call_gemini_api(prompt, max_retries=3):
                 if response.status_code == 200:
                     result = response.json()
                     if 'candidates' in result and result['candidates']:
+                        # 检查是否因为长度被截断
+                        finish_reason = result['candidates'][0].get('finishReason', '')
+                        if finish_reason == 'MAX_TOKENS':
+                            print(f"⚠️ 输出被截断，尝试下一个模型...")
+                            break
                         print(f"✅ 成功使用模型 {model_name}")
                         return result['candidates'][0]['content']['parts'][0]['text']
                     else:
@@ -273,9 +283,9 @@ def call_gemini_api(prompt, max_retries=3):
 def generate_full_report(news_data, keyword_news, previous_predictions):
     """生成完整的新闻简报"""
     
-    # 准备数据
-    data_payload = json.dumps(news_data[:150], ensure_ascii=False)
-    keyword_payload = json.dumps(keyword_news[:50], ensure_ascii=False)
+    # 准备数据 - 限制数量以减少 token 消耗
+    data_payload = json.dumps(news_data[:100], ensure_ascii=False)
+    keyword_payload = json.dumps(keyword_news[:30], ensure_ascii=False)
     
     # 准备前一天预测复盘内容
     prediction_review = ""
@@ -284,102 +294,69 @@ def generate_full_report(news_data, keyword_news, previous_predictions):
     ### 前一天预测复盘数据：
     {json.dumps(previous_predictions, ensure_ascii=False)}
     
-    请在报告中增加"预测复盘"部分，评估前一天的市场预测是否准确，分析预测偏差的原因。
+    请在报告中增加"预测复盘"部分，评估前一天的市场预测是否准确。
     """
 
-    prompt = f"""
-    你是一名资深的国际媒体分析师和金融市场专家。以下是过去24小时的全球新闻数据。
-    
-    === 全部新闻数据 ===
-    {data_payload}
-    
-    === 关键词追踪新闻（China/Taiwan/Semiconductor相关，已排除南华早报）===
-    {keyword_payload}
-    
-    {prediction_review}
+    prompt = f"""你是一名资深的国际媒体分析师。请根据以下新闻数据生成 HTML 简报。
 
-    请生成一份专业的 HTML 简报（直接输出HTML，不要Markdown，不要 ```html 包裹）：
+=== 新闻数据 ===
+{data_payload}
 
-    ---
-    ## 第一部分：跨区域舆情对比 (Media Focus Analysis)
-    深度分析"美国"、"欧洲"和"亚洲"媒体的关注点差异。用 300 字左右的中文进行深度点评。
+=== 关键词新闻（China/Taiwan/Semiconductor，已排除南华早报）===
+{keyword_payload}
 
-    ---
-    ## 第二部分：全球核心议题聚合 (Top Stories)
-    找出全球媒体共同关注的 5-8 个核心大事件。
-    - 使用 <h3 style="color:#2c3e50; margin-top:20px;">中文主标题</h3>
-    - <p style="font-size:14px;">中英文摘要（100字）</p>
-    - <ul style="font-size:12px; color:#666;"><li><a href="链接">[媒体名] 英文原标题</a></li></ul>
+{prediction_review}
 
-    ---
-    ## 第三部分：🔥 China/Taiwan/Semiconductor 专题追踪
-    **结构要求**：
-    1. 首先用 200-300 字进行深度分析和总结，包括：
-       - 这些新闻反映的地缘政治趋势
-       - 对半导体产业链的潜在影响
-       - **你的独立判断和观点**（例如：你认为局势会如何发展，哪些信号值得关注）
-    2. 然后再列出相关新闻的标题和链接
-    
-    **注意**：不要包含南华早报(South China Morning Post)的新闻。
+请生成 HTML 简报（直接输出HTML，不要```html包裹），包含以下6个部分：
 
-    ---
-    ## 第四部分：📈 市场影响预测 (Market Impact Forecast)
-    基于今日重大地缘政治新闻，预测可能的市场变动：
-    - 对美股（特别是科技股、半导体股）的影响
-    - 对亚太市场的影响
-    - 对汇率（美元、人民币、日元）的影响
-    - 对大宗商品（石油、黄金）的影响
-    - 给出具体的预测方向（上涨/下跌/震荡）和置信度（高/中/低）
-    
-    **重要**：预测数据需要用 HTML 注释隐藏，格式如下（这部分不会显示在邮件中）：
-    <!-- PREDICTIONS_JSON_START
-    {{
-        "date": "YYYY-MM-DD",
-        "predictions": [
-            {{"asset": "资产名称", "direction": "上涨/下跌/震荡", "confidence": "高/中/低", "reason": "简要原因"}}
-        ]
-    }}
-    PREDICTIONS_JSON_END -->
-    
-    **不要在正文中显示任何 JSON 格式的数据！**
+【第一部分：跨区域舆情对比】
+分析美国、欧洲、亚洲媒体关注点差异，约200字中文。
 
-    ---
-    ## 第五部分：预测复盘 (Prediction Review)
-    如果有前一天的预测数据，请评估预测准确性；如果没有，请写"暂无历史预测数据可供复盘"。
+【第二部分：全球核心议题】
+5-6个核心事件，每个包含：中文标题、50字摘要、2-3条原文链接。
 
-    ---
-    ## 第六部分：📰 其他新闻速览 (Other Headlines)
-    将未在核心议题中提及的其他新闻，按地区分类列出。
-    
-    **排版要求**（使用卡片式布局，更美观）：
-    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:20px; margin-top:20px;">
-        <div style="background:#f8f9fa; border-radius:8px; padding:15px; border-left:4px solid #3498db;">
-            <h4 style="margin:0 0 10px; color:#2c3e50;">🇺🇸 美国媒体</h4>
-            <ul style="font-size:12px; margin:0; padding-left:18px; line-height:1.8;">
-                <li><a href="链接" style="color:#3498db; text-decoration:none;">[媒体名] 标题</a></li>
-            </ul>
-        </div>
-        <div style="background:#f8f9fa; border-radius:8px; padding:15px; border-left:4px solid #e74c3c;">
-            <h4 style="margin:0 0 10px; color:#2c3e50;">🇪🇺 欧洲媒体</h4>
-            ...
-        </div>
-        <div style="background:#f8f9fa; border-radius:8px; padding:15px; border-left:4px solid #f39c12;">
-            <h4 style="margin:0 0 10px; color:#2c3e50;">🌏 亚洲媒体</h4>
-            ...
-        </div>
-    </div>
-    
-    每个地区最多列出 10 条新闻。
+【第三部分：China/Taiwan/Semiconductor 专题】
+先写150字分析（含你的判断），再列出相关新闻链接。不含南华早报。
 
-    ---
-    **样式要求**：
-    - 使用内联CSS
-    - 标题深蓝色 (#2c3e50)，正文 (#333)
-    - 链接蓝色 (#3498db)，hover时有下划线
-    - 各部分之间用 <hr style="border:1px solid #eee; margin:30px 0;"> 分隔
-    - 预测部分用醒目的背景色 (#fff3cd) 突出显示
-    - 确保所有内容都是干净的 HTML，不要有裸露的 JSON 文本
-    """
+【第四部分：市场影响预测】
+用表格形式展示预测：
+<table style="width:100%; border-collapse:collapse; margin:15px 0;">
+<tr style="background:#2c3e50; color:white;">
+<th style="padding:10px; border:1px solid #ddd;">资产</th>
+<th style="padding:10px; border:1px solid #ddd;">预测方向</th>
+<th style="padding:10px; border:1px solid #ddd;">置信度</th>
+<th style="padding:10px; border:1px solid #ddd;">理由</th>
+</tr>
+<tr><td style="padding:8px; border:1px solid #ddd;">美股科技股</td><td>...</td><td>...</td><td>...</td></tr>
+</table>
+
+预测数据用HTML注释隐藏：
+<!-- PREDICTIONS_JSON_START {{"date":"YYYY-MM-DD","predictions":[...]}} PREDICTIONS_JSON_END -->
+
+【第五部分：预测复盘】
+如有历史数据则评估，否则写"暂无历史预测数据"。
+
+【第六部分：其他新闻速览】
+按地区分3列展示（每列最多8条）：
+<div style="display:flex; gap:15px; flex-wrap:wrap;">
+<div style="flex:1; min-width:250px; background:#f8f9fa; padding:12px; border-radius:6px; border-left:3px solid #3498db;">
+<h4 style="margin:0 0 8px; color:#2c3e50; font-size:14px;">🇺🇸 美国</h4>
+<ul style="margin:0; padding-left:16px; font-size:12px; line-height:1.6;">
+<li><a href="链接" style="color:#3498db;">标题</a></li>
+</ul>
+</div>
+<div style="flex:1; min-width:250px; background:#f8f9fa; padding:12px; border-radius:6px; border-left:3px solid #e74c3c;">
+<h4 style="margin:0 0 8px; color:#2c3e50; font-size:14px;">🇪🇺 欧洲</h4>
+...
+</div>
+<div style="flex:1; min-width:250px; background:#f8f9fa; padding:12px; border-radius:6px; border-left:3px solid #f39c12;">
+<h4 style="margin:0 0 8px; color:#2c3e50; font-size:14px;">🌏 亚洲</h4>
+...
+</div>
+</div>
+
+样式：标题#2c3e50，链接#3498db，各部分用<hr style="border:1px solid #eee; margin:25px 0;">分隔。
+"""
 
     return call_gemini_api(prompt)
 
@@ -403,7 +380,6 @@ def clean_html_output(html_content):
     html_content = html_content.replace("```html", "").replace("```", "")
     
     # 移除可能暴露的 JSON 数据（作为备用清理）
-    # 匹配类似 { "date": "...", "predictions": [...] } 的模式
     json_pattern = r'\{\s*"date"\s*:\s*"[^"]+"\s*,\s*"predictions"\s*:\s*\[.*?\]\s*\}'
     html_content = re.sub(json_pattern, '', html_content, flags=re.DOTALL)
     
