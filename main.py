@@ -8,7 +8,7 @@ import time
 import os
 import ssl
 import json
-from google import genai  # <--- 注意这里引用变了
+import requests # <--- 我们只用这个最稳的库
 
 # --- 配置 ---
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
@@ -38,14 +38,14 @@ MEDIA_LIST = [
 ]
 
 def fetch_raw_data():
-    """只负责抓取数据，不生成HTML"""
+    """只负责抓取数据"""
     print("正在抓取 RSS 数据...")
     now = datetime.datetime.utcnow()
     all_articles = []
 
     for media in MEDIA_LIST:
         try:
-            feed = feedparser.parse(media['url'], agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+            feed = feedparser.parse(media['url']) # 去掉了 agent 参数以防兼容性问题
             if not feed.entries: continue
 
             for entry in feed.entries:
@@ -56,7 +56,6 @@ def fetch_raw_data():
                 elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
                     published_time = datetime.datetime.fromtimestamp(time.mktime(entry.updated_parsed))
                 
-                # 如果没有时间戳，默认收录前5条
                 is_recent = False
                 if published_time:
                     if (now - published_time).total_seconds() <= 24 * 3600:
@@ -78,50 +77,66 @@ def fetch_raw_data():
     return all_articles
 
 def analyze_with_ai(articles):
-    """调用 Gemini API (新版 SDK) 进行整理"""
+    """【直连模式】不使用 Google 库，直接用 HTTP 请求调用 API"""
     if not GEMINI_API_KEY:
-        print("❌ 未检测到 API Key，跳过 AI 分析，使用原始列表。")
+        print("❌ 未检测到 API Key。")
         return None
 
-    print("🤖 正在调用 Gemini 1.5 Flash (新版 SDK) 进行分析...")
+    print("🤖 正在呼叫 Gemini API (HTTP 直连模式)...")
     
-    # 限制投喂数量，防止超出 Token 限制
+    # 限制投喂数量
     data_str = json.dumps(articles[:80], ensure_ascii=False) 
     
     prompt = f"""
     你是一名专业的国际新闻主编。以下是过去24小时全球主要媒体的原始新闻数据（JSON格式）：
-    
     {data_str}
-
     请完成以下任务：
     1. **去重与聚类**：将报道同一事件的不同媒体新闻归为一类。
     2. **中文简报**：为每个重要事件写一段中文摘要（100字以内）。
     3. **引用来源**：在摘要下方列出原文链接（格式：[媒体名] 英文原标题 (带链接)）。
     4. **重要性排序**：优先展示地缘政治、中美关系、重大经济新闻。
-    5. **HTML输出**：直接输出 HTML 代码 (无markdown标记)。
-    
+    5. **HTML输出**：直接输出 HTML 代码，不要包含 ```html 标记。
     HTML 格式要求：
     - 使用 <h3 style="color:#2c3e50; margin-top:20px;"> 作为事件标题。
     - 使用 <p style="font-size:14px; line-height:1.6;"> 作为摘要。
     - 使用 <ul style="color:#7f8c8d; font-size:12px;"> 列表展示来源。
     """
 
+    # --- 核心：直接构造 HTTP 请求 ---
+    # 使用 v1beta 接口，这是目前兼容性最好的公开接口
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=){GEMINI_API_KEY}"
+    
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+
     try:
-        # --- 新版 SDK 调用方式 ---
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',  # 这里可以用 gemini-1.5-flash 或 gemini-2.0-flash-exp
-            contents=prompt
-        )
-        return response.text
+        response = requests.post(url, headers=headers, json=data, timeout=60)
+        
+        if response.status_code != 200:
+            print(f"❌ API 请求失败: {response.status_code}")
+            print(f"错误详情: {response.text}")
+            return None
+            
+        result = response.json()
+        # 解析返回的 JSON 结构
+        try:
+            ai_text = result['candidates'][0]['content']['parts'][0]['text']
+            return ai_text
+        except (KeyError, IndexError):
+            print("❌ API 返回结构异常，无法解析。")
+            print(result)
+            return None
+
     except Exception as e:
-        print(f"❌ AI 分析失败: {e}")
-        # 打印更多错误细节以便调试
-        if hasattr(e, 'message'): print(e.message)
+        print(f"❌ 连接错误: {e}")
         return None
 
 def fallback_html_generator(articles):
-    """如果 AI 挂了，使用这个备用生成器"""
+    """备用生成器"""
     html = "<h2>⚠️ AI 服务暂时不可用，以下是原始列表</h2><hr>"
     articles_by_source = {}
     for art in articles:
@@ -183,7 +198,6 @@ if __name__ == "__main__":
     if raw_data:
         ai_content = analyze_with_ai(raw_data)
         if ai_content:
-            # 清洗 AI 可能带有的 Markdown 标记
             clean_content = ai_content.replace("```html", "").replace("```", "").strip()
             send_email(clean_content)
         else:
