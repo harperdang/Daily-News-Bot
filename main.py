@@ -13,7 +13,7 @@ import requests
 # --- 配置 ---
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
-# --- 1. 媒体列表 (带地区标签) ---
+# --- 1. 媒体列表 ---
 MEDIA_SOURCES = {
     "US": [
         {"name": "The New York Times", "url": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"},
@@ -46,12 +46,10 @@ def fetch_all_news():
     for region, sources in MEDIA_SOURCES.items():
         for source in sources:
             try:
-                # 设置 User-Agent 防止被拦截
                 feed = feedparser.parse(source['url'], agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
                 if not feed.entries: continue
 
                 for entry in feed.entries:
-                    # 时间筛选 (24小时内)
                     published_time = None
                     if hasattr(entry, 'published_parsed') and entry.published_parsed:
                         published_time = datetime.datetime.fromtimestamp(time.mktime(entry.published_parsed))
@@ -64,7 +62,6 @@ def fetch_all_news():
                             is_recent = True
                     else:
                         is_recent = True 
-                        # 简单的熔断机制，防止单次请求过大
                         if len(structured_news) > 150: is_recent = False
 
                     if is_recent:
@@ -81,17 +78,18 @@ def fetch_all_news():
     return structured_news
 
 def get_best_available_model(api_key):
-    """
-    自动查询 Google API，找到当前账号可用的最佳模型。
-    """
+    """自动查询 Google API"""
     print("🔍 正在查询可用模型列表...")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    
+    # 纯净 URL，绝对不带括号
+    raw_base = "https://generativelanguage.googleapis.com/v1beta/models"
+    url = f"{raw_base}?key={api_key}"
     
     try:
         response = requests.get(url, timeout=10)
         if response.status_code != 200:
             print(f"⚠️ 无法获取模型列表: {response.text}")
-            return 'models/gemini-1.5-flash' # 默认回退
+            return 'models/gemini-1.5-flash'
 
         data = response.json()
         models = data.get('models', [])
@@ -105,13 +103,8 @@ def get_best_available_model(api_key):
         
         print(f"✅ 发现可用模型: {candidates}")
 
-        # --- 这里改成了多行格式，防止复制出错 ---
-        priority_keywords = [
-            'gemini-2.0-flash',
-            'gemini-2.5-pro',
-            'gemini-1.5-pro',
-            'gemini-1.5-flash'
-        ]
+        # 单行列表写法，防止复制换行错误
+        priority_keywords = ['gemini-2.0-flash', 'gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-1.5-flash']
         
         for keyword in priority_keywords:
             for c in candidates:
@@ -129,11 +122,9 @@ def call_gemini_api(news_data):
         print("❌ 错误: 没找到 GEMINI_API_KEY")
         return None
     
-    # 1. 获取模型名称
     model_name = get_best_available_model(GEMINI_API_KEY)
     print(f"🤖 决定使用模型: {model_name}")
 
-    # 2. 准备数据
     data_payload = json.dumps(news_data[:150], ensure_ascii=False)
 
     prompt = f"""
@@ -163,8 +154,10 @@ def call_gemini_api(news_data):
     - 链接蓝色 (#3498db)，去除下划线。
     """
 
-    # 3. 发送请求 (纯净 URL 拼接)
+    # --- 核心修正点：纯净字符串 ---
+    # 绝对没有任何 Markdown 格式
     base_url = "[https://generativelanguage.googleapis.com/v1beta](https://generativelanguage.googleapis.com/v1beta)"
+    
     final_url = f"{base_url}/{model_name}:generateContent?key={GEMINI_API_KEY}"
 
     headers = {'Content-Type': 'application/json'}
@@ -187,7 +180,7 @@ def call_gemini_api(news_data):
         if 'candidates' in result and result['candidates']:
             return result['candidates'][0]['content']['parts'][0]['text']
         else:
-            print("❌ API 返回空内容 (Blocked):")
+            print("❌ API 返回空内容:")
             print(result)
             return None
 
@@ -206,7 +199,6 @@ def send_email(content):
 
     receivers = [r.strip() for r in receivers_str.split(',') if r.strip()]
 
-    # 自动匹配服务器
     if 'qq.com' in sender: smtp_server = 'smtp.qq.com'
     elif '163.com' in sender: smtp_server = 'smtp.163.com'
     else: smtp_server = 'smtp.gmail.com'
