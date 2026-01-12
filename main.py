@@ -156,7 +156,7 @@ def call_gemini_api(news_data):
 
     # --- 核心修正点：纯净字符串 ---
     # 绝对没有任何 Markdown 格式
-    base_url = "[https://generativelanguage.googleapis.com/v1beta](https://generativelanguage.googleapis.com/v1beta)"
+    base_url = "https://generativelanguage.googleapis.com/v1beta"
     
     final_url = f"{base_url}/{model_name}:generateContent?key={GEMINI_API_KEY}"
 
