@@ -77,19 +77,18 @@ def fetch_all_news():
     print(f"共抓取到 {len(structured_news)} 条新闻。")
     return structured_news
 
-def get_best_available_model(api_key):
-    """自动查询 Google API"""
+def get_available_models(api_key):
+    """获取所有可用的 Gemini 模型列表，按优先级排序"""
     print("🔍 正在查询可用模型列表...")
     
-    # 纯净 URL，绝对不带括号
-    raw_base = "https://generativelanguage.googleapis.com/v1beta/models"
-    url = f"{raw_base}?key={api_key}"
+    base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+    url = f"{base_url}?key={api_key}"
     
     try:
         response = requests.get(url, timeout=10)
         if response.status_code != 200:
             print(f"⚠️ 无法获取模型列表: {response.text}")
-            return 'models/gemini-1.5-flash'
+            return ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']
 
         data = response.json()
         models = data.get('models', [])
@@ -103,27 +102,40 @@ def get_best_available_model(api_key):
         
         print(f"✅ 发现可用模型: {candidates}")
 
-        # 单行列表写法，防止复制换行错误
-        priority_keywords = ['gemini-2.0-flash', 'gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-1.5-flash']
+        # 按优先级排序模型（优先使用稳定版本，避免 exp 版本配额问题）
+        priority_keywords = [
+            'gemini-1.5-flash',      # 稳定版优先
+            'gemini-1.5-pro',
+            'gemini-2.0-flash',      # 2.0 版本次之
+            'gemini-pro',
+        ]
         
+        sorted_models = []
         for keyword in priority_keywords:
             for c in candidates:
-                if keyword in c:
-                    return c
-            
-        return candidates[0] if candidates else 'models/gemini-1.5-flash'
+                # 排除实验版本（exp），它们配额更严格
+                if keyword in c and '-exp' not in c and c not in sorted_models:
+                    sorted_models.append(c)
+        
+        # 添加剩余模型
+        for c in candidates:
+            if c not in sorted_models:
+                sorted_models.append(c)
+        
+        return sorted_models if sorted_models else ['models/gemini-1.5-flash']
 
     except Exception as e:
         print(f"⚠️ 模型探测失败: {e}")
-        return 'models/gemini-1.5-flash'
+        return ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']
 
-def call_gemini_api(news_data):
+def call_gemini_api_with_retry(news_data, max_retries=3):
+    """带重试和模型降级的 API 调用"""
     if not GEMINI_API_KEY:
         print("❌ 错误: 没找到 GEMINI_API_KEY")
         return None
     
-    model_name = get_best_available_model(GEMINI_API_KEY)
-    print(f"🤖 决定使用模型: {model_name}")
+    available_models = get_available_models(GEMINI_API_KEY)
+    print(f"📋 将按顺序尝试以下模型: {available_models}")
 
     data_payload = json.dumps(news_data[:150], ensure_ascii=False)
 
@@ -135,7 +147,7 @@ def call_gemini_api(news_data):
     请生成一份专业的 HTML 简报（直接输出HTML，不要Markdown，不要 ```html 包裹）：
 
     ### 第一部分：跨区域舆情对比 (Media Focus Analysis)
-    **深度分析“美国”、“欧洲”和“亚洲”媒体的关注点差异。**
+    **深度分析"美国"、"欧洲"和"亚洲"媒体的关注点差异。**
     - 比如：美国是否聚焦于国内政治或中东？亚洲是否更关注经济或台海？
     - 请用 300 字左右的中文进行深度点评。
 
@@ -154,12 +166,7 @@ def call_gemini_api(news_data):
     - 链接蓝色 (#3498db)，去除下划线。
     """
 
-    # --- 核心修正点：纯净字符串 ---
-    # 绝对没有任何 Markdown 格式
     base_url = "https://generativelanguage.googleapis.com/v1beta"
-    
-    final_url = f"{base_url}/{model_name}:generateContent?key={GEMINI_API_KEY}"
-
     headers = {'Content-Type': 'application/json'}
     body = {
         "contents": [{
@@ -167,26 +174,60 @@ def call_gemini_api(news_data):
         }]
     }
 
-    try:
-        response = requests.post(final_url, headers=headers, json=body, timeout=120)
+    # 尝试每个可用模型
+    for model_name in available_models:
+        print(f"\n🤖 尝试使用模型: {model_name}")
+        final_url = f"{base_url}/{model_name}:generateContent?key={GEMINI_API_KEY}"
         
-        if response.status_code != 200:
-            print(f"❌ API 请求失败，状态码: {response.status_code}")
-            print(f"❌ 错误信息: {response.text}")
-            return None
-            
-        result = response.json()
-        
-        if 'candidates' in result and result['candidates']:
-            return result['candidates'][0]['content']['parts'][0]['text']
-        else:
-            print("❌ API 返回空内容:")
-            print(result)
-            return None
+        # 每个模型最多重试 max_retries 次
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(final_url, headers=headers, json=body, timeout=120)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if 'candidates' in result and result['candidates']:
+                        print(f"✅ 成功使用模型 {model_name}")
+                        return result['candidates'][0]['content']['parts'][0]['text']
+                    else:
+                        print(f"⚠️ API 返回空内容: {result}")
+                        break  # 换下一个模型
+                
+                elif response.status_code == 429:
+                    # 配额限制，解析重试时间
+                    error_data = response.json()
+                    retry_delay = 30  # 默认等待30秒
+                    
+                    # 尝试从错误信息中获取建议的重试时间
+                    details = error_data.get('error', {}).get('details', [])
+                    for detail in details:
+                        if detail.get('@type') == 'type.googleapis.com/google.rpc.RetryInfo':
+                            delay_str = detail.get('retryDelay', '30s')
+                            retry_delay = int(delay_str.replace('s', ''))
+                            break
+                    
+                    if attempt < max_retries - 1:
+                        print(f"⏳ 配额限制，等待 {retry_delay} 秒后重试... (尝试 {attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                    else:
+                        print(f"⚠️ 模型 {model_name} 配额已用尽，尝试下一个模型...")
+                        break  # 换下一个模型
+                
+                else:
+                    print(f"❌ API 请求失败，状态码: {response.status_code}")
+                    print(f"❌ 错误信息: {response.text}")
+                    break  # 换下一个模型
 
-    except Exception as e:
-        print(f"❌ 连接异常: {e}")
-        return None
+            except requests.exceptions.Timeout:
+                print(f"⏱️ 请求超时 (尝试 {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(5)
+            except Exception as e:
+                print(f"❌ 连接异常: {e}")
+                break  # 换下一个模型
+
+    print("❌ 所有模型都失败了")
+    return None
 
 def send_email(content):
     sender = os.environ.get('MAIL_USERNAME')
@@ -237,7 +278,7 @@ def send_email(content):
 if __name__ == "__main__":
     news_data = fetch_all_news()
     if news_data:
-        analysis_html = call_gemini_api(news_data)
+        analysis_html = call_gemini_api_with_retry(news_data)
         if analysis_html:
             # 清洗 Markdown 标记
             clean_html = analysis_html.replace("```html", "").replace("```", "").strip()
