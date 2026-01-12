@@ -3,7 +3,7 @@ name: Daily News Scraper
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *' # 每天北京时间早上 8 点运行
+    - cron: '0 0 * * *' # 每天北京时间早上 8 点
 
 jobs:
   build:
@@ -24,7 +24,9 @@ jobs:
 
       - name: Run Scraper
         env:
+          # --- 这里必须把 Secrets 传给环境变量 ---
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
           MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # <--- 新增这一行！
         run: python main.py
