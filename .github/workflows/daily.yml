@@ -23,7 +23,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Scraper
-                env:
+        env:
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
           MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
