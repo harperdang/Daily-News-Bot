@@ -10,6 +10,16 @@ import ssl
 import json
 import requests
 import re
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# --- 日志配置 ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # --- 配置 ---
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
@@ -49,44 +59,51 @@ MEDIA_SOURCES = {
     ]
 }
 
+def _fetch_source(source, region, now):
+    """抓取单个 RSS 源的新闻"""
+    results = []
+    try:
+        feed = feedparser.parse(source['url'], agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+        if not feed.entries:
+            return results
+
+        for entry in feed.entries:
+            published_time = None
+            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                published_time = datetime.datetime(*entry.published_parsed[:6], tzinfo=datetime.timezone.utc)
+            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                published_time = datetime.datetime(*entry.updated_parsed[:6], tzinfo=datetime.timezone.utc)
+
+            # Only include articles from the last 24 hours
+            # Skip articles with no timestamp — they could be old
+            if published_time and (now - published_time).total_seconds() <= 24 * 3600:
+                results.append({
+                    "region": region,
+                    "source": source['name'],
+                    "title": entry.title,
+                    "link": entry.link,
+                })
+    except Exception as e:
+        logger.warning(f"Error fetching {source['name']}: {e}")
+    return results
+
+
 def fetch_all_news():
-    """抓取所有 RSS 新闻"""
-    print("正在抓取 RSS 数据...")
-    now = datetime.datetime.utcnow()
+    """抓取所有 RSS 新闻（并发）"""
+    logger.info("正在抓取 RSS 数据...")
+    now = datetime.datetime.now(datetime.timezone.utc)
     structured_news = []
 
-    for region, sources in MEDIA_SOURCES.items():
-        for source in sources:
-            try:
-                feed = feedparser.parse(source['url'], agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
-                if not feed.entries: continue
+    tasks = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        for region, sources in MEDIA_SOURCES.items():
+            for source in sources:
+                tasks.append(executor.submit(_fetch_source, source, region, now))
 
-                for entry in feed.entries:
-                    published_time = None
-                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                        published_time = datetime.datetime.fromtimestamp(time.mktime(entry.published_parsed))
-                    elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                        published_time = datetime.datetime.fromtimestamp(time.mktime(entry.updated_parsed))
-                    
-                    is_recent = False
-                    if published_time:
-                        if (now - published_time).total_seconds() <= 24 * 3600:
-                            is_recent = True
-                    else:
-                        is_recent = True 
-                        if len(structured_news) > 200: is_recent = False
+        for future in as_completed(tasks):
+            structured_news.extend(future.result())
 
-                    if is_recent:
-                        structured_news.append({
-                            "region": region,
-                            "source": source['name'],
-                            "title": entry.title,
-                            "link": entry.link,
-                        })
-            except Exception as e:
-                print(f"Error fetching {source['name']}: {e}")
-
-    print(f"共抓取到 {len(structured_news)} 条新闻。")
+    logger.info(f"共抓取到 {len(structured_news)} 条新闻。")
     return structured_news
 
 def filter_keyword_news(news_data):
@@ -109,16 +126,16 @@ def filter_keyword_news(news_data):
 def load_previous_predictions():
     """从 GitHub Gist 加载前一天的预测"""
     if not GIST_TOKEN or not GIST_ID:
-        print("⚠️ 未配置 GIST_TOKEN 或 GIST_ID，跳过预测复盘")
+        logger.warning("未配置 GIST_TOKEN 或 GIST_ID，跳过预测复盘")
         return None
-    
+
     try:
         headers = {
             'Authorization': f'token {GIST_TOKEN}',
             'Accept': 'application/vnd.github.v3+json'
         }
         response = requests.get(f'https://api.github.com/gists/{GIST_ID}', headers=headers, timeout=10)
-        
+
         if response.status_code == 200:
             gist_data = response.json()
             if 'predictions.json' in gist_data['files']:
@@ -126,15 +143,15 @@ def load_previous_predictions():
                 return json.loads(content)
         return None
     except Exception as e:
-        print(f"⚠️ 加载预测数据失败: {e}")
+        logger.warning(f"加载预测数据失败: {e}")
         return None
 
 def save_predictions(predictions):
     """保存今天的预测到 GitHub Gist"""
     if not GIST_TOKEN or not GIST_ID:
-        print("⚠️ 未配置 GIST_TOKEN 或 GIST_ID，跳过保存预测")
+        logger.warning("未配置 GIST_TOKEN 或 GIST_ID，跳过保存预测")
         return
-    
+
     try:
         headers = {
             'Authorization': f'token {GIST_TOKEN}',
@@ -147,70 +164,71 @@ def save_predictions(predictions):
                 }
             }
         }
-        response = requests.patch(f'https://api.github.com/gists/{GIST_ID}', 
+        response = requests.patch(f'https://api.github.com/gists/{GIST_ID}',
                                   headers=headers, json=data, timeout=10)
         if response.status_code == 200:
-            print("✅ 预测数据已保存")
+            logger.info("预测数据已保存")
         else:
-            print(f"⚠️ 保存预测失败: {response.text}")
+            logger.warning(f"保存预测失败: {response.text}")
     except Exception as e:
-        print(f"⚠️ 保存预测数据失败: {e}")
+        logger.warning(f"保存预测数据失败: {e}")
 
 def get_available_models(api_key):
     """获取所有可用的 Gemini 模型列表，按优先级排序"""
-    print("🔍 正在查询可用模型列表...")
-    
+    logger.info("正在查询可用模型列表...")
+
     base_url = "https://generativelanguage.googleapis.com/v1beta/models"
     url = f"{base_url}?key={api_key}"
-    
+
     try:
         response = requests.get(url, timeout=10)
         if response.status_code != 200:
-            print(f"⚠️ 无法获取模型列表: {response.text}")
-            return ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']
+            logger.warning(f"无法获取模型列表: {response.text}")
+            return ['models/gemini-2.0-flash', 'models/gemini-1.5-pro']
 
         data = response.json()
         models = data.get('models', [])
-        
+
         candidates = []
         for m in models:
             name = m.get('name', '')
             methods = m.get('supportedGenerationMethods', [])
             if 'generateContent' in methods and 'gemini' in name:
                 candidates.append(name)
-        
-        print(f"✅ 发现可用模型: {candidates}")
 
-        # 优先使用 Pro 模型（输出更长更完整）
+        logger.info(f"发现可用模型: {candidates}")
+
+        # 优先使用较新的模型
         priority_keywords = [
-            'gemini-1.5-pro',
+            'gemini-2.5-pro',
+            'gemini-2.5-flash',
             'gemini-2.0-flash',
+            'gemini-1.5-pro',
             'gemini-1.5-flash',
-            'gemini-pro',
         ]
-        
+
         sorted_models = []
         for keyword in priority_keywords:
             for c in candidates:
                 if keyword in c and '-exp' not in c and c not in sorted_models:
                     sorted_models.append(c)
-        
+
         for c in candidates:
             if c not in sorted_models:
                 sorted_models.append(c)
-        
-        return sorted_models if sorted_models else ['models/gemini-1.5-flash']
+
+        return sorted_models if sorted_models else ['models/gemini-2.0-flash']
 
     except Exception as e:
-        print(f"⚠️ 模型探测失败: {e}")
-        return ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']
+        logger.warning(f"模型探测失败: {e}")
+        return ['models/gemini-2.0-flash', 'models/gemini-1.5-pro']
 
 def call_gemini_api(prompt, max_retries=3):
     """通用的 Gemini API 调用函数，增加输出长度配置"""
     if not GEMINI_API_KEY:
-        print("❌ 错误: 没找到 GEMINI_API_KEY")
+        logger.error("没找到 GEMINI_API_KEY")
         return None
-    
+
     available_models = get_available_models(GEMINI_API_KEY)
     base_url = "https://generativelanguage.googleapis.com/v1beta"
     headers = {'Content-Type': 'application/json'}
@@ -219,65 +237,63 @@ def call_gemini_api(prompt, max_retries=3):
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "maxOutputTokens": 8192,  # 增加输出长度限制
+            "maxOutputTokens": 16384,
             "temperature": 0.7
         }
     }
 
     for model_name in available_models:
-        print(f"\n🤖 尝试使用模型: {model_name}")
+        logger.info(f"尝试使用模型: {model_name}")
         final_url = f"{base_url}/{model_name}:generateContent?key={GEMINI_API_KEY}"
-        
+
         for attempt in range(max_retries):
             try:
                 response = requests.post(final_url, headers=headers, json=body, timeout=180)
-                
+
                 if response.status_code == 200:
                     result = response.json()
                     if 'candidates' in result and result['candidates']:
-                        # 检查是否因为长度被截断
                         finish_reason = result['candidates'][0].get('finishReason', '')
                         if finish_reason == 'MAX_TOKENS':
-                            print(f"⚠️ 输出被截断，尝试下一个模型...")
+                            logger.warning("输出被截断，尝试下一个模型...")
                             break
-                        print(f"✅ 成功使用模型 {model_name}")
+                        logger.info(f"成功使用模型 {model_name}")
                         return result['candidates'][0]['content']['parts'][0]['text']
                     else:
-                        print(f"⚠️ API 返回空内容: {result}")
+                        logger.warning(f"API 返回空内容: {result}")
                         break
-                
+
                 elif response.status_code == 429:
                     error_data = response.json()
                     retry_delay = 30
-                    
+
                     details = error_data.get('error', {}).get('details', [])
                     for detail in details:
                         if detail.get('@type') == 'type.googleapis.com/google.rpc.RetryInfo':
                             delay_str = detail.get('retryDelay', '30s')
                             retry_delay = int(delay_str.replace('s', ''))
                             break
-                    
+
                     if attempt < max_retries - 1:
-                        print(f"⏳ 配额限制，等待 {retry_delay} 秒后重试... (尝试 {attempt + 1}/{max_retries})")
+                        logger.info(f"配额限制，等待 {retry_delay} 秒后重试... (尝试 {attempt + 1}/{max_retries})")
                         time.sleep(retry_delay)
                     else:
-                        print(f"⚠️ 模型 {model_name} 配额已用尽，尝试下一个模型...")
+                        logger.warning(f"模型 {model_name} 配额已用尽，尝试下一个模型...")
                         break
-                
+
                 else:
-                    print(f"❌ API 请求失败，状态码: {response.status_code}")
-                    print(f"❌ 错误信息: {response.text}")
+                    logger.error(f"API 请求失败，状态码: {response.status_code}, 错误: {response.text}")
                     break
 
             except requests.exceptions.Timeout:
-                print(f"⏱️ 请求超时 (尝试 {attempt + 1}/{max_retries})")
+                logger.warning(f"请求超时 (尝试 {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
                     time.sleep(5)
             except Exception as e:
-                print(f"❌ 连接异常: {e}")
+                logger.error(f"连接异常: {e}")
                 break
 
-    print("❌ 所有模型都失败了")
+    logger.error("所有模型都失败了")
     return None
 
 def generate_full_report(news_data, keyword_news, previous_predictions):
@@ -371,7 +387,7 @@ def extract_predictions(html_content):
             json_str = match.group(1).strip()
             return json.loads(json_str)
     except Exception as e:
-        print(f"⚠️ 提取预测数据失败: {e}")
+        logger.warning(f"提取预测数据失败: {e}")
     return None
 
 def clean_html_output(html_content):
@@ -391,7 +407,7 @@ def send_email(content):
     receivers_str = os.environ.get('MAIL_RECEIVER')
 
     if not sender or not password or not receivers_str:
-        print("❌ 无法发送邮件：Secrets 缺失")
+        logger.error("无法发送邮件：Secrets 缺失")
         return
 
     receivers = [r.strip() for r in receivers_str.split(',') if r.strip()]
@@ -428,40 +444,45 @@ def send_email(content):
         with smtplib.SMTP_SSL(smtp_server, 465, context=context) as server:
             server.login(sender, password)
             server.sendmail(sender, receivers, msg.as_string())
-        print("✅ 邮件发送成功！")
+        logger.info("邮件发送成功！")
     except Exception as e:
-        print(f"❌ 邮件发送失败: {e}")
+        logger.error(f"邮件发送失败: {e}")
 
 if __name__ == "__main__":
-    # 1. 抓取新闻
-    news_data = fetch_all_news()
-    
-    if not news_data:
-        print("未抓取到新闻。")
-        exit()
-    
-    # 2. 筛选关键词新闻（已排除南华早报）
-    keyword_news = filter_keyword_news(news_data)
-    print(f"🔍 找到 {len(keyword_news)} 条关键词相关新闻")
-    
-    # 3. 加载前一天的预测
-    previous_predictions = load_previous_predictions()
-    if previous_predictions:
-        print(f"📊 已加载前一天的预测数据")
-    
-    # 4. 生成完整报告
-    analysis_html = generate_full_report(news_data, keyword_news, previous_predictions)
-    
-    if analysis_html:
-        # 5. 提取并保存今天的预测（在清理之前）
-        today_predictions = extract_predictions(analysis_html)
-        if today_predictions:
-            save_predictions(today_predictions)
-        
-        # 6. 清理 HTML 输出
-        clean_html = clean_html_output(analysis_html)
-        
-        # 7. 发送邮件
-        send_email(clean_html)
-    else:
-        print("⚠️ 分析失败，跳过发送。")
+    try:
+        # 1. 抓取新闻
+        news_data = fetch_all_news()
+
+        if not news_data:
+            logger.warning("未抓取到新闻，退出。")
+            exit(1)
+
+        # 2. 筛选关键词新闻（已排除南华早报）
+        keyword_news = filter_keyword_news(news_data)
+        logger.info(f"找到 {len(keyword_news)} 条关键词相关新闻")
+
+        # 3. 加载前一天的预测
+        previous_predictions = load_previous_predictions()
+        if previous_predictions:
+            logger.info("已加载前一天的预测数据")
+
+        # 4. 生成完整报告
+        analysis_html = generate_full_report(news_data, keyword_news, previous_predictions)
+
+        if analysis_html:
+            # 5. 提取并保存今天的预测（在清理之前）
+            today_predictions = extract_predictions(analysis_html)
+            if today_predictions:
+                save_predictions(today_predictions)
+
+            # 6. 清理 HTML 输出
+            clean_html = clean_html_output(analysis_html)
+
+            # 7. 发送邮件
+            send_email(clean_html)
+        else:
+            logger.error("分析失败，跳过发送。")
+            exit(1)
+    except Exception as e:
+        logger.critical(f"程序异常退出: {e}", exc_info=True)
+        exit(1)
